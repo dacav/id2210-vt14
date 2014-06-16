@@ -114,6 +114,16 @@ public final class ResourceManager extends ComponentDefinition {
 		return "[" + res.getNumFreeCpus() + " " + self.getIp() + "]";
 	}
 
+	private static FuncTools.Proposition<PeerCap> buildFilterProposition (final Task t) {
+		return new FuncTools.Proposition<PeerCap>() {
+			@Override
+			public boolean eval(PeerCap param) {
+				return param.maxMemory >= t.required.memoryInMbs
+						&& param.maxCpu >= t.required.numCpus;
+			}
+		};
+	}
+
 	Handler<RmInit> handleInit = new Handler<RmInit>() {
 
 		@Override
@@ -164,12 +174,35 @@ public final class ResourceManager extends ComponentDefinition {
 	Handler<FdetPort.Dead> handleFailure = new Handler<FdetPort.Dead>() {
 		@Override
 		public void handle(FdetPort.Dead event) {
+			trigger(new FdetPort.Unsubscribe(event.ref), fdetPort);
+			List<Task> orphans = clearOutstandingOf(event.ref);
+
+			if (orphans == null) {
+				log.info(getId() + ": Dead neighbor {}, no outstanding probes", event.ref);
+			} else {
+				log.info(getId() + ": Dead neighbor {}, retrying with {} outstanding probes",
+					event.ref, orphans.size()
+				);
+				for (Task o : orphans) {
+					List<PeerCap> candidates = FuncTools.filter(buildFilterProposition(o), neighbours);
+					if (candidates.isEmpty()) {
+						log.warn(getId() + ": Aborting execution for {}, no candidates.", o.id);
+					} else {
+						Address target = candidates.get(random.nextInt(candidates.size())).address;
+						log.debug(getId() + " SENDING ANOTHER PROBE FOR " + o.id + " TO " + target);
+						addToOustanding(target, o);
+						trigger(new Probing.Request(self, target, o.required, o.id), networkPort);
+						trigger(new FdetPort.Subscribe(target), fdetPort);
+					}
+				}
+			}
 		}
 	};
 
 	Handler<FdetPort.Undead> handleRestore = new Handler<FdetPort.Undead>() {
 		@Override
 		public void handle(FdetPort.Undead event) {
+			log.debug(getId() + ": IGNORING ZOMBIE NEIGHBOR " + event.ref);
 		}
 	};
 
@@ -177,13 +210,7 @@ public final class ResourceManager extends ComponentDefinition {
 		assert !waiting.contains(t);
 		waiting.add(t);
 
-		FuncTools.Proposition<PeerCap> p = new FuncTools.Proposition<PeerCap>() {
-			@Override
-			public boolean eval(PeerCap param) {
-				return param.maxMemory >= t.required.memoryInMbs
-						&& param.maxCpu >= t.required.numCpus;
-			}
-		};
+		FuncTools.Proposition<PeerCap> p = buildFilterProposition(t);
 
 		/* Select only among nodes which can satisfy this task */
 		List<PeerCap> sel = FuncTools.filter(p, neighbours);
@@ -197,6 +224,7 @@ public final class ResourceManager extends ComponentDefinition {
 			chosen.add(cap);
 			addToOustanding(cap.address, t);
 			trigger(new Probing.Request(self, cap.address, t.required, t.id), networkPort);
+			trigger(new FdetPort.Subscribe(cap.address), fdetPort);
 		}
 
 		log.debug(getId() + " SENDING PROBE FOR " + t.id + " TO " + chosen);
@@ -236,33 +264,37 @@ public final class ResourceManager extends ComponentDefinition {
 					+ " TO " + peer.getIp());
 			trigger(new Probing.Cancel(self, peer, reserved.id),
 					networkPort);
+			trigger(new FdetPort.Unsubscribe(peer), fdetPort);
 		}
 	}
 
 	private final Handler<Probing.Response> handleProbingResponse = new Handler<Probing.Response>() {
 		@Override
 		public void handle(Probing.Response resp) {
-			Task t = getOustanding(resp.getSource(), resp.referenceId);
-			log.debug(getId() + " GOT RESPONSE FROM "
-					+ resp.getSource().getIp() + " FOR " + t.id);
+			Task t = getOutstanding(resp.getSource(), resp.referenceId);
 			if (t != null) {
+				log.debug(getId() + " GOT RESPONSE FROM " + resp.getSource().getIp() + " FOR " + t.id);
 				serve(resp.getSource(), t);
+			} else {
+				log.debug(getId() + " GOT LATE RESPONSE FROM " + resp.getSource().getIp());
 			}
-			assert t != null;
 		}
 
 	};
 
 	private void addToOustanding(Address address, Task t) {
-
 		if (!outstanding.containsKey(address))
 			outstanding.put(address, new TreeMap<Long, Task>());
 
 		outstanding.get(address).put(t.id, t);
-
 	}
 
-	private Task getOustanding(Address source, long id) {
+	private List<Task> clearOutstandingOf(Address faulty) {
+		Map<Long, Task> remove = outstanding.remove(faulty);
+		return remove == null ? null : new ArrayList<Task>(remove.values());
+	}
+
+	private Task getOutstanding(Address source, long id) {
 		Task toReturn = null;
 		Map<Long, Task> addressToIds = outstanding.get(source);
 		if (addressToIds != null)
@@ -323,6 +355,7 @@ public final class ResourceManager extends ComponentDefinition {
 		@Override
 		public void handle(Completed event) {
 			log.debug(getId() + " TASK TERMINATED BY " + event.getSource());
+			trigger(new FdetPort.Unsubscribe(event.getSource()), fdetPort);
 		}
 	};
 
