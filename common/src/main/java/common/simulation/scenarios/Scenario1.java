@@ -27,7 +27,7 @@ public class Scenario1 extends Scenario {
 				final int interArrival = (int) (1000 / (((NODES * NODE_CPU) / JOB_CPU) / (JOB_TIME / 1000)) / load);
 				StochasticProcess process0 = new StochasticProcess() {
 					{
-						eventInterArrivalTime(constant(1000));
+						eventInterArrivalTime(constant(1));
 						raise(NODES, Operations.peerJoin(),
 								uniform(0, Integer.MAX_VALUE),
 								constant(NODE_CPU), constant(NODE_MEMORY));
